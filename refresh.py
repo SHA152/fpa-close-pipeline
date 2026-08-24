@@ -391,12 +391,27 @@ def stage5_validate(text, payload, audience):
 # ============================================================================
 # STAGE 6 - PUBLISH: render the static dashboard + append the run log.
 # ============================================================================
+def write_reports(narratives, run_id, validation):
+    """Write each narrative as a plain markdown file under reports/.
+    These are the REVIEWABLE artifacts: GitHub renders .md diffs as readable
+    documents in the pull request, so the approver reads the commentary
+    itself - not an HTML or JSON diff - before merging."""
+    rep = ROOT / "reports"
+    rep.mkdir(exist_ok=True)
+    for aud, text in narratives.items():
+        md = (f"<!-- run {run_id} | model {LLM_MODEL} | validation {validation} "
+              f"| review this file in the PR before merging -->\n\n" + text.strip() + "\n")
+        (rep / f"may-2026_{aud}.md").write_text(md, encoding="utf-8")
+    print(f"[OK] Reviewable reports written -> reports/may-2026_<audience>.md")
+
+
 def stage6_publish(rows, agg, model_anchors, narratives, run_id, run_record):
     log_path = RUNS_DIR / "run_log.jsonl"
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(run_record) + "\n")
     html = render_dashboard(rows, agg, model_anchors, narratives, log_path)
     (DOCS_DIR / "index.html").write_text(html, encoding="utf-8")
+    write_reports(narratives, run_id, run_record["validation"])
     print(f"[OK] Stage 6: dashboard rendered -> docs/index.html ; "
           f"run appended -> runs/run_log.jsonl")
 
@@ -553,6 +568,7 @@ def main():
                       for aud in AUDIENCES}
         html = render_dashboard(rows, agg, anchors, narratives, log)
         (DOCS_DIR / "index.html").write_text(html, encoding="utf-8")
+        write_reports(narratives, rid, "PASS")
         print(f"[OK] Dashboard re-rendered from approved run {rid} "
               f"(no API call, no new log entry).")
         return
