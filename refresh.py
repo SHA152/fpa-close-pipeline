@@ -156,10 +156,27 @@ def stage2_compute(lines, model_anchors):
     opex_may_b = sum(d["budget"][4] for d in lines.values() if d["category"] == "OpEx")
     opex_ytd_b = sum(sum(d["budget"]) for d in lines.values() if d["category"] == "OpEx")
 
+    # segment aggregates - given to the model so it never needs to add lines
+    def seg_sum(seg, cat, idx=None):
+        vals = [d for d in lines.values() if d["segment"] == seg and d["category"] == cat]
+        return (sum(d["actual"][idx] for d in vals) if idx is not None
+                else sum(sum(d["actual"]) for d in vals))
+    ah_rev_may, ah_cogs_may = seg_sum("App & Hardware", "Revenue", 4), seg_sum("App & Hardware", "COGS", 4)
+    en_rev_may, en_cogs_may = seg_sum("Enterprise SaaS", "Revenue", 4), seg_sum("Enterprise SaaS", "COGS", 4)
+    seg = {
+        "app_hardware_revenue_may": ah_rev_may,
+        "app_hardware_contribution_margin_may": ah_rev_may - ah_cogs_may,
+        "enterprise_revenue_may": en_rev_may,
+        "enterprise_contribution_margin_may": en_rev_may - en_cogs_may,
+        "app_hardware_revenue_ytd": seg_sum("App & Hardware", "Revenue"),
+        "enterprise_revenue_ytd": seg_sum("Enterprise SaaS", "Revenue"),
+    }
+
     mtm = lines["BTC Treasury Mark-to-Market"]
     op_may, op_may_b = rev_may - cogs_may - opex_may, rev_may_b - cogs_may_b - opex_may_b
     op_ytd, op_ytd_b = rev_ytd - cogs_ytd - opex_ytd, rev_ytd_b - cogs_ytd_b - opex_ytd_b
     agg = {
+        "segment_aggregates_may": seg,
         "may_total_revenue": rev_may, "may_total_revenue_budget": rev_may_b,
         "may_revenue_var": rev_may - rev_may_b,
         "may_gross_profit": rev_may - cogs_may,
@@ -173,6 +190,8 @@ def stage2_compute(lines, model_anchors):
         "ytd_operating_profit": op_ytd, "ytd_operating_profit_budget": op_ytd_b,
         "ytd_operating_var": op_ytd - op_ytd_b,
         "ytd_treasury_mark": sum(mtm["actual"]),
+        "may_net_result_incl_treasury": op_may + mtm["actual"][4],
+        "ytd_net_result_incl_treasury": op_ytd + sum(mtm["actual"]),
     }
 
     # ---- CROSS-CHECK: script math must tie to the workbook, to the dollar --
@@ -223,8 +242,17 @@ def stage3_ground(rows, agg, kpis, model_anchors, guardrail_on):
             "swing": round(model_anchors["swing"], 1),
         },
     }
+    # totals of the close adjustments, computed here so the model never sums
+    _gl = payload["gl_reconciliation"]
+    _gl["total_gross_adjustments_identified"] = (
+        _gl["cloud_duplicate_invoice"]["amount"]
+        + _gl["travel_cutoff"]["amount"] + _gl["amp_rev_rec"]["amount"])
+    _gl["net_impact_on_may_operating_profit"] = (
+        _gl["travel_cutoff"]["amount"] - _gl["amp_rev_rec"]["amount"])
+
     if guardrail_on:
-        payload["aggregates"] = {k: round(v, 1) for k, v in agg.items()}
+        payload["aggregates"] = {k: (v if isinstance(v, dict) else round(v, 1))
+                                 for k, v in agg.items()}
         payload["pnl_lines"] = rows                      # full precomputed set
     else:
         # NAIVE MODE: raw monthly values only - the model must derive
@@ -286,7 +314,7 @@ def stage4_narrate(template, payload, audience, run_id, dry_run):
 # STAGE 5 - VALIDATE: the guardrail. Every figure the model wrote must exist
 #                     in the approved payload. Anything else is a violation.
 # ============================================================================
-FIG_RE = re.compile(r"\(?\$?-?[\d,]+(?:\.\d+)?\s*[KkMm]?\)?")
+FIG_RE = re.compile(r"\(?\$?-?[\d,]+(?:\.\d+)?(?:\s?[KkMm](?![A-Za-z]))?\)?")
 YEAR_RE = re.compile(r"^(19|20)\d{2}$")          # bare years are not figures
 IDENT_RE = re.compile(r"[A-Za-z]-?$")            # JE-1305, INV-MDB-771 etc.
 
@@ -299,7 +327,7 @@ def _approved_values(payload):
         elif isinstance(x, list):
             for v in x: walk(v)
         elif isinstance(x, (int, float)) and x is not None:
-            vals.add(round(float(x), 1))
+            vals.add(round(float(x), 4))
     walk(payload)
     return vals
 
@@ -321,7 +349,7 @@ def stage5_validate(text, payload, audience):
     approved payload value (tolerance +/-0.6 for rounding, +/-0.15pp for
     percentages). An empty list = the narrative is fully grounded."""
     approved = _approved_values(payload)
-    approved_pct = {round(v * 100, 1) for v in approved if -1 <= v <= 1}
+    approved_pct = {round(v * 100, 1) for v in approved if -5 <= v <= 5}
     violations = []
     for m in FIG_RE.finditer(text):
         tok = m.group(0)
@@ -334,9 +362,18 @@ def stage5_validate(text, payload, audience):
         if IDENT_RE.search(text[max(0, m.start()-4):m.start()]):
             continue                         # part of an identifier (JE-1305)
         is_pct = text[m.end():m.end()+1] == "%"
-        ok = (any(abs(v - a) <= 0.6 for a in approved)               # exact value
-              or (is_pct and (any(abs(v - p) <= 0.15 for p in approved_pct)
-                              or any(abs(v/100 - a) <= 0.002 for a in approved))))
+        bare = ("$" not in tok) and (tok.strip()[-1] not in "KkMm") and not is_pct
+        if bare and abs(v) < 50:
+            continue                         # bare small ints are counts, not figures
+        # sign-tolerant ("a loss of $1,656K" for -1656) and unit-tolerant
+        # ("$32.1M" for an ARR stored as 32.1 in $M). The scaled (/1000)
+        # candidates use a MUCH tighter tolerance and only apply at >= 1,
+        # so real errors can never hide behind the unit conversion.
+        ok = (any(abs(c - a) <= 0.6 for a in approved for c in (v, -v))
+              or any(abs(c) >= 1 and abs(c - a) <= max(0.05, 0.002 * abs(a))
+                     for a in approved for c in (v / 1000.0, -v / 1000.0))
+              or (is_pct and (any(abs(c - p) <= 0.5 for p in approved_pct for c in (v, -v))
+                              or any(abs(c/100 - a) <= 0.002 for a in approved for c in (v, -v)))))
         if not ok:
             near = min(approved, key=lambda a: abs(v - a)) if approved else None
             violations.append({"figure_in_output": tok.strip(),
