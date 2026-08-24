@@ -401,6 +401,24 @@ def stage6_publish(rows, agg, model_anchors, narratives, run_id, run_record):
           f"run appended -> runs/run_log.jsonl")
 
 
+def _md_html(text):
+    """Minimal markdown renderer for the narrative panels: #-headings,
+    **bold**, paragraphs. No external dependency; everything else escaped."""
+    import html as _h
+    blocks = []
+    for para in text.replace("\r\n", "\n").split("\n\n"):
+        p = para.strip()
+        if not p:
+            continue
+        if p.lstrip().startswith("#"):
+            blocks.append('<h4 class="nh">' + _h.escape(p.lstrip("#").strip()) + "</h4>")
+        else:
+            esc = _h.escape(p).replace("\n", "<br>")
+            esc = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
+            blocks.append("<p>" + esc + "</p>")
+    return "".join(blocks)
+
+
 def _fmt(v):
     if v is None: return "n/m"
     return f"({abs(v):,.0f})" if v < 0 else f"{v:,.0f}"
@@ -436,7 +454,7 @@ def render_dashboard(rows, agg, anchors, narratives, log_path):
     nar_html = ""
     for aud, label in (("bu_leader", "Business-Unit Leader view"),
                        ("cfo_board", "CFO / Board view")):
-        body = narratives.get(aud, "(not generated this run)").replace("\n", "<br>")
+        body = _md_html(narratives.get(aud, "(not generated this run)"))
         nar_html += f'<div class="panel"><h3>{label}</h3><div class="nar">{body}</div></div>'
 
     log_rows = ""
@@ -481,6 +499,10 @@ def render_dashboard(rows, agg, anchors, narratives, log_path):
   .panel {{ border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px 16px; }}
   .panel h3 {{ margin:0 0 8px; font-size:13.5px; }}
   .nar {{ font-size:12.5px; color:#222; }}
+  .nar p {{ margin:0 0 9px; }}
+  .nar .nh {{ margin:12px 0 4px; font-size:12px; text-transform:uppercase;
+             letter-spacing:.04em; color:#52514e; }}
+  .nar .nh:first-child {{ margin-top:0; }}
   .foot {{ margin-top:26px; color:var(--ink2); font-size:11.5px;
            border-top:1px solid var(--line); padding-top:10px; }}
   @media (max-width:760px) {{ .panels {{ grid-template-columns:1fr; }} }}
@@ -512,7 +534,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--guardrail", choices=["on", "off"], default="on")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--render-only", action="store_true",
+                    help="re-render docs/index.html from the latest PASS run; "
+                         "no API call, no new run-log entry")
     args = ap.parse_args()
+
+    if args.render_only:
+        lines, kpis, anchors = stage1_extract()
+        rows, agg = stage2_compute(lines, anchors)
+        log = RUNS_DIR / "run_log.jsonl"
+        entries = [json.loads(l) for l in log.read_text(encoding="utf-8").strip().splitlines()]
+        passed = [e for e in entries if e.get("validation") == "PASS"]
+        if not passed:
+            sys.exit("[ABORT] no PASS run on record to render.")
+        rid = passed[-1]["run_id"]
+        narratives = {aud: json.loads((RUNS_DIR / f"{rid}_{aud}.json")
+                                      .read_text(encoding="utf-8"))["response_text"]
+                      for aud in AUDIENCES}
+        html = render_dashboard(rows, agg, anchors, narratives, log)
+        (DOCS_DIR / "index.html").write_text(html, encoding="utf-8")
+        print(f"[OK] Dashboard re-rendered from approved run {rid} "
+              f"(no API call, no new log entry).")
+        return
     guardrail_on = args.guardrail == "on"
 
     run_id = datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
