@@ -101,10 +101,10 @@ def stage1_extract():
         "may_operating_profit": wb["BvA"]["B35"].value,
         "ytd_operating_profit": wb["BvA"]["G35"].value,
         "ytd_treasury_mark":  wb["BvA"]["G36"].value,
-        "base_fy_operating_result": wb["Forecast"]["C5"].value,
-        "bear_fy_operating_result": wb["Forecast"]["C6"].value,
-        "swing": wb["Forecast"]["C7"].value,
-        "btc_scenario_price": wb["Inputs"]["C5"].value,
+        "base_fy_operating_result": wb["Forecast"]["H5"].value,
+        "bear_fy_operating_result": wb["Forecast"]["H6"].value,
+        "swing": wb["Forecast"]["H7"].value,
+        "btc_scenario_price": wb["Inputs"]["H5"].value,
         "corrected_may_operating_profit": wb["GL_Recon"]["B38"].value,
     }
     return lines, kpis, model_anchors
@@ -225,8 +225,8 @@ def stage3_ground(rows, agg, kpis, model_anchors, guardrail_on):
         "kpis_jan_to_may": kpis,
         "gl_reconciliation": {
             "cloud_duplicate_invoice": {"je": "JE-1147", "amount": 30,
-                "corrected_may_cloud_opex": 450,
-                "note": "duplicate MongoDB invoice INV-MDB-771; ledger-side fix, reported P&L unaffected"},
+                "clean_may_cloud_opex": 480,
+                "note": "duplicate MongoDB invoice INV-MDB-771 exists only in the ledger (GL 510 vs reported 480); reported May cloud of 480 is already clean - ledger-side fix, reported P&L unaffected"},
             "travel_cutoff": {"je": "JE-1203", "amount": 150,
                 "corrected_may_travel_events": 25,
                 "note": "June conference sponsorship expensed in May; belongs in June as prepaid release"},
